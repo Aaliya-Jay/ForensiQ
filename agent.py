@@ -7,7 +7,7 @@ from tools import profile_dataset, execute_pipeline
 
 # Initialize Google GenAI client
 client = genai.Client()
-MODEL_NAME = "gemini-3.6-flash"
+MODEL_NAME = "gemini-2.5-flash"
 
 
 def plan_initial_strategy(profile: dict) -> dict:

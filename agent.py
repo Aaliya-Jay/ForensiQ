@@ -5,8 +5,7 @@ from tools import profile_dataset, execute_pipeline
 
 
 def get_api_key():
-    """Safely retrieves the API key without raising KeyError at import time."""
-    # 1. Try Streamlit secrets safely
+    """Safely retrieves the API key without raising KeyError."""
     try:
         import streamlit as st
         if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
@@ -14,7 +13,6 @@ def get_api_key():
     except Exception:
         pass
 
-    # 2. Try OS Environment variable
     env_key = os.environ.get("GEMINI_API_KEY")
     if env_key:
         return env_key.strip()
@@ -23,10 +21,10 @@ def get_api_key():
 
 
 def call_gemini(prompt: str) -> str:
-    """Invokes Gemini with safe key resolution and model fallback."""
+    """Invokes Gemini with fallback options."""
     key = get_api_key()
     if not key:
-        raise ValueError("GEMINI_API_KEY is not configured. Please add it to Streamlit Secrets or Environment Variables.")
+        raise ValueError("GEMINI_API_KEY is missing. Add it to Streamlit Secrets or Environment Variables.")
 
     client = genai.Client(api_key=key)
     models_to_try = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
@@ -39,7 +37,6 @@ def call_gemini(prompt: str) -> str:
                 contents=prompt,
             )
             text = response.text.strip()
-            # Clean possible markdown formatting
             if text.startswith("```json"):
                 text = text[7:]
             if text.startswith("```"):
@@ -121,10 +118,16 @@ def run_forensiq(df, target_column: str, target_f1_threshold: float = 0.80):
     # 1. Investigate
     yield {"status": "investigating", "message": "🔍 Profiling dataset and investigating anomalies..."}
     profile = profile_dataset(df, target_column)
+    
+    rows = profile.get("total_rows") or profile.get("n_rows") or profile.get("rows") or len(df)
+    cols = profile.get("total_cols") or profile.get("n_cols") or profile.get("cols") or len(df.columns)
+    missing_cnt = len(profile.get("missing_summary", {}))
+    dup_cnt = profile.get("duplicate_rows", 0)
+
     yield {
         "status": "profile_complete",
         "profile": profile,
-        "message": f"📊 Profile: {profile['total_rows']} rows × {profile['total_cols']} cols. Issues: Missing values across {len(profile['missing_summary'])} column(s) | {profile['duplicate_rows']} duplicate row(s)"
+        "message": f"📊 Profile: {rows} rows × {cols} cols. Issues: Missing values in {missing_cnt} col(s) | {dup_cnt} duplicate row(s)"
     }
 
     # 2. Plan

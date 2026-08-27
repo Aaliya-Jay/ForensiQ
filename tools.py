@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
@@ -36,33 +36,28 @@ def profile_dataset(df: pd.DataFrame, target_col: str) -> dict:
 
 
 def execute_pipeline(df: pd.DataFrame, target_col: str, strategy: dict):
-    """Executes preprocessing and training according to the planned strategy."""
+    """Executes preprocessing and training for binary or multi-class targets."""
     clean_df = df.copy()
 
-    # Drop non-predictive ID columns if present
+    # Drop non-predictive ID columns
     id_cols = [c for c in clean_df.columns if "id" in c.lower() and c != target_col]
     if id_cols:
         clean_df = clean_df.drop(columns=id_cols)
 
+    # Clean target: drop NaN in target
     clean_df = clean_df.dropna(subset=[target_col])
 
     X = clean_df.drop(columns=[target_col])
-    y = clean_df[target_col]
+    y_raw = clean_df[target_col]
 
-    # Convert binary/categorical targets to integer labels
-    if y.dtype == "object" or str(y.dtype) == "category" or not np.issubdtype(y.dtype, np.number):
-        classes = list(y.unique())
-        if len(classes) == 2:
-            y = y.map({classes[0]: 0, classes[1]: 1}).astype(int)
-        else:
-            y = pd.factorize(y)[0]
-    else:
-        y = y.astype(int)
+    # Robust target encoding for numeric, binary string, or multi-class string
+    le = LabelEncoder()
+    y = le.fit_transform(y_raw.astype(str))
 
     num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
     cat_cols = X.select_dtypes(exclude=[np.number]).columns.tolist()
 
-    # Numeric Pipeline: Impute -> Scale (optional)
+    # Numeric Pipeline
     imp_strategy = strategy.get("imputation_strategy", "median")
     if imp_strategy not in ["mean", "median", "most_frequent"]:
         imp_strategy = "median"
@@ -71,7 +66,7 @@ def execute_pipeline(df: pd.DataFrame, target_col: str, strategy: dict):
     if strategy.get("scaling", True):
         num_steps.append(("scaler", StandardScaler()))
 
-    # Categorical Pipeline: Impute -> OneHotEncoder
+    # Categorical Pipeline
     cat_steps = [
         ("imputer", SimpleImputer(strategy="most_frequent")),
         ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False))

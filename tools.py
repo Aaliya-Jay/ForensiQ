@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
@@ -49,18 +49,20 @@ def execute_pipeline(df: pd.DataFrame, target_col: str, strategy: dict):
     X = clean_df.drop(columns=[target_col])
     y = clean_df[target_col]
 
-    # Convert binary categorical targets to numeric
-    if y.dtype == "object" or str(y.dtype) == "category":
+    # Convert binary/categorical targets to integer labels
+    if y.dtype == "object" or str(y.dtype) == "category" or not np.issubdtype(y.dtype, np.number):
         classes = list(y.unique())
         if len(classes) == 2:
-            y = y.map({classes[0]: 0, classes[1]: 1})
+            y = y.map({classes[0]: 0, classes[1]: 1}).astype(int)
         else:
             y = pd.factorize(y)[0]
+    else:
+        y = y.astype(int)
 
     num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
     cat_cols = X.select_dtypes(exclude=[np.number]).columns.tolist()
 
-    # Preprocessing
+    # Numeric Pipeline: Impute -> Scale (optional)
     imp_strategy = strategy.get("imputation_strategy", "median")
     if imp_strategy not in ["mean", "median", "most_frequent"]:
         imp_strategy = "median"
@@ -69,20 +71,26 @@ def execute_pipeline(df: pd.DataFrame, target_col: str, strategy: dict):
     if strategy.get("scaling", True):
         num_steps.append(("scaler", StandardScaler()))
 
+    # Categorical Pipeline: Impute -> OneHotEncoder
+    cat_steps = [
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False))
+    ]
+
     transformers = []
     if num_cols:
         transformers.append(("num", Pipeline(num_steps), num_cols))
     if cat_cols:
-        transformers.append(("cat", SimpleImputer(strategy="most_frequent"), cat_cols))
+        transformers.append(("cat", Pipeline(cat_steps), cat_cols))
 
     preprocessor = ColumnTransformer(transformers=transformers, remainder="drop")
 
-    # Model definition
-    model_type = strategy.get("model_type", "logistic")
+    # Classifier Selection
+    model_type = str(strategy.get("model_type", "logistic")).lower()
     class_weight = strategy.get("handle_imbalance", "none")
     cw_param = "balanced" if class_weight == "balanced" else None
 
-    if model_type == "random_forest":
+    if "random" in model_type or "rf" in model_type or "forest" in model_type:
         clf = RandomForestClassifier(n_estimators=100, random_state=42, class_weight=cw_param)
     else:
         clf = LogisticRegression(max_iter=1000, random_state=42, class_weight=cw_param)
@@ -92,7 +100,7 @@ def execute_pipeline(df: pd.DataFrame, target_col: str, strategy: dict):
         ("classifier", clf)
     ])
 
-    # Train / Test split with safe stratification fallback
+    # Safe train/test splitting with stratification fallback
     test_size = 0.2 if len(X) >= 50 else 0.3
     try:
         X_train, X_test, y_train, y_test = train_test_split(

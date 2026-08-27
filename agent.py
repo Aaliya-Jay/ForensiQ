@@ -1,83 +1,93 @@
 import os
 import json
-import streamlit as st
 from google import genai
-from google.genai import types
 from tools import profile_dataset, execute_pipeline
 
-# Resolve Gemini API Key from Streamlit Secrets or OS Environment
-api_key = None
-try:
-    if "GEMINI_API_KEY" in st.secrets:
-        api_key = st.secrets["GEMINI_API_KEY"]
-except Exception:
-    pass
 
-if not api_key:
-    api_key = os.environ.get("GEMINI_API_KEY")
+def get_api_key():
+    """Safely retrieves the API key without raising KeyError at import time."""
+    # 1. Try Streamlit secrets safely
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
+            return str(st.secrets["GEMINI_API_KEY"]).strip()
+    except Exception:
+        pass
 
-# Initialize the GenAI Client
-client = genai.Client(api_key=api_key) if api_key else genai.Client()
-MODEL_NAME = "gemini-2.5-flash"
+    # 2. Try OS Environment variable
+    env_key = os.environ.get("GEMINI_API_KEY")
+    if env_key:
+        return env_key.strip()
+
+    return None
 
 
-def call_gemini_with_fallback(prompt: str) -> str:
-    """Invokes Gemini with fallback options for model availability."""
-    models_to_try = [MODEL_NAME, "gemini-1.5-flash", "gemini-1.5-pro"]
+def call_gemini(prompt: str) -> str:
+    """Invokes Gemini with safe key resolution and model fallback."""
+    key = get_api_key()
+    if not key:
+        raise ValueError("GEMINI_API_KEY is not configured. Please add it to Streamlit Secrets or Environment Variables.")
+
+    client = genai.Client(api_key=key)
+    models_to_try = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+    
     last_error = None
-
-    for model in models_to_try:
+    for model_name in models_to_try:
         try:
             response = client.models.generate_content(
-                model=model,
+                model=model_name,
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.2,
-                ),
             )
-            return response.text
+            text = response.text.strip()
+            # Clean possible markdown formatting
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            return text.strip()
         except Exception as e:
             last_error = e
             continue
 
-    raise RuntimeError(f"All Gemini model calls failed. Last error: {last_error}")
+    raise RuntimeError(f"Failed calling Gemini models. Last error: {last_error}")
 
 
 def plan_initial_strategy(profile: dict) -> dict:
-    """Stage 2: Plan - AI formulates the first ML execution plan."""
+    """Stage 2: Plan - AI formulates initial ML execution plan."""
     prompt = f"""
 You are ForensiQ, an autonomous ML forensic engineer.
-Analyze the following dataset profile and provide an initial end-to-end classification strategy in JSON.
+Analyze the following dataset profile and provide an initial classification strategy in raw JSON format only.
 
 Dataset Profile:
 {json.dumps(profile, indent=2)}
 
 Requirements:
-- Choose model_type: "logistic" or "random_forest" (use "logistic" first for baseline).
+- model_type: "logistic" or "random_forest" (use "logistic" first as baseline).
 - imputation_strategy: "mean", "median", or "mode".
 - scaling: true or false.
 - handle_imbalance: "none" or "balanced".
-- Provide a clear, concise forensic 'reasoning' string explaining your choices.
+- reasoning: Short forensic justification.
 
-Return ONLY a JSON object matching this schema:
+Return ONLY valid JSON matching this schema:
 {{
   "model_type": "logistic",
   "imputation_strategy": "median",
   "scaling": true,
   "handle_imbalance": "none",
-  "reasoning": "string explanation"
+  "reasoning": "Baseline linear model to evaluate initial distribution."
 }}
 """
-    raw_response = call_gemini_with_fallback(prompt)
-    return json.loads(raw_response)
+    raw = call_gemini(prompt)
+    return json.loads(raw)
 
 
 def reflect_and_revise(profile: dict, previous_strategy: dict, metrics: dict, threshold: float) -> dict:
     """Stage 4: Reflect & Self-Correct - AI critiques results and devises a revised strategy."""
     prompt = f"""
 You are ForensiQ, an autonomous ML forensic engineer performing self-reflection.
-The previous iteration failed to achieve the target F1 score threshold of {threshold}.
+The previous iteration failed to reach the target F1 score threshold of {threshold}.
 
 Dataset Profile:
 {json.dumps(profile, indent=2)}
@@ -85,13 +95,12 @@ Dataset Profile:
 Previous Strategy:
 {json.dumps(previous_strategy, indent=2)}
 
-Observed Evaluation Metrics:
+Observed Metrics:
 {json.dumps(metrics, indent=2)}
 
-Analyze why the previous model performed poorly (e.g., class imbalance, non-linearity, unscaled features).
-Formulate a revised, superior strategy to cross the target F1 threshold.
+Analyze why the previous model performed poorly. Formulate a revised strategy.
 
-Return ONLY a JSON object matching this schema:
+Return ONLY valid JSON matching this schema:
 {{
   "critique": "Forensic critique of why previous strategy underperformed",
   "model_type": "random_forest",
@@ -101,34 +110,33 @@ Return ONLY a JSON object matching this schema:
   "reasoning": "Detailed justification for the revised adjustments"
 }}
 """
-    raw_response = call_gemini_with_fallback(prompt)
-    return json.loads(raw_response)
+    raw = call_gemini(prompt)
+    return json.loads(raw)
 
 
 def run_forensiq(df, target_column: str, target_f1_threshold: float = 0.80):
     """
-    Main Autonomous Loop (Generator yielding trace logs for real-time Streamlit streaming).
-    Lifecycle: Investigate -> Plan -> Act -> Reflect -> Self-Correct -> Finalize
+    Main Autonomous Loop (Generator yielding trace events).
     """
-    # 1. Investigate / Diagnostic Profiling
+    # 1. Investigate
     yield {"status": "investigating", "message": "🔍 Profiling dataset and investigating anomalies..."}
     profile = profile_dataset(df, target_column)
     yield {
         "status": "profile_complete",
         "profile": profile,
-        "message": f"📊 Profile: {profile['total_rows']} rows × {profile['total_cols']} cols. Issues: Missing values across {len(profile['missing_summary'])} column(s) | {profile['duplicate_rows']} duplicate row(s) | Target balance: {json.dumps(profile['target_distribution'])}"
+        "message": f"📊 Profile: {profile['total_rows']} rows × {profile['total_cols']} cols. Issues: Missing values across {len(profile['missing_summary'])} column(s) | {profile['duplicate_rows']} duplicate row(s)"
     }
 
-    # 2. Plan (Iteration 1)
+    # 2. Plan
     yield {"status": "planning_v1", "message": "🧠 AI Planner: Formulating initial data treatment strategy..."}
     plan_v1 = plan_initial_strategy(profile)
     yield {
         "status": "plan_v1_ready",
         "strategy": plan_v1,
-        "message": f"📋 Strategy 1: Model={plan_v1.get('model_type').upper()} | Scaler={plan_v1.get('scaling')} | ClassWeight={plan_v1.get('handle_imbalance')}\nReason: {plan_v1.get('reasoning')}"
+        "message": f"📋 Strategy 1: Model={plan_v1.get('model_type', 'logistic').upper()} | Scaler={plan_v1.get('scaling', True)} | ClassWeight={plan_v1.get('handle_imbalance', 'none')}\nReason: {plan_v1.get('reasoning', '')}"
     }
 
-    # 3. Act (Iteration 1 Execution)
+    # 3. Act (Iteration 1)
     yield {"status": "executing_v1", "message": "⚙️ Executing Pipeline (Iteration 1)..."}
     pipeline_v1, metrics_v1 = execute_pipeline(df, target_column, plan_v1)
     
@@ -146,7 +154,7 @@ def run_forensiq(df, target_column: str, target_f1_threshold: float = 0.80):
     best_metrics = metrics_v1
     best_iteration = 1
 
-    # 4. Reflect & Self-Correction Trigger
+    # 4. Reflect & Correct
     if metrics_v1["f1_score"] < target_f1_threshold:
         yield {
             "status": "reflecting",
@@ -170,7 +178,7 @@ def run_forensiq(df, target_column: str, target_f1_threshold: float = 0.80):
             "message": f"💡 Strategy 2: Model={plan_v2['model_type'].upper()} | ClassWeight={plan_v2['handle_imbalance']}\nAdjustment: {reflection_result.get('critique', plan_v2['reasoning'])}"
         }
 
-        # 5. Act (Iteration 2 Execution)
+        # 5. Act (Iteration 2)
         yield {"status": "executing_v2", "message": "⚙️ Retraining with revised strategy (Iteration 2)..."}
         pipeline_v2, metrics_v2 = execute_pipeline(df, target_column, plan_v2)
         
@@ -197,7 +205,7 @@ def run_forensiq(df, target_column: str, target_f1_threshold: float = 0.80):
                 "message": "⚠️ Iteration 2 did not improve score. Retaining Iteration 1 pipeline."
             }
 
-    # 6. Finalize & Package Artifacts
+    # 6. Finalize
     yield {
         "status": "finalized",
         "best_iteration": best_iteration,
